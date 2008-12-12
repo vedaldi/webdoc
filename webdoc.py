@@ -133,6 +133,10 @@ class DocNode:
             data = data + c.render()
         return data
 
+    def getRootRelativeDirName(self):
+        if self.parent:
+            return self.parent.getRootRelativeDirName()
+
 # --------------------------------------------------------------------    
 class DocInclude(DocNode):
 # --------------------------------------------------------------------
@@ -158,6 +162,12 @@ class DocDir(DocNode):
     def __str__(self):        
         return DocNode.__str__(self) + ":<web:dir name='%s'>" \
             % xml.sax.saxutils.escape(self.dirName)
+
+    def getRootRelativeDirName(self):
+        str = ""
+        if self.parent:
+            str = self.parent.getRootRelativeDirName()
+        return str + self.dirName + "/"
 
 # --------------------------------------------------------------------    
 class DocText(DocNode):
@@ -205,6 +215,9 @@ class DocSite(DocNode):
     def __str__(self):        
         return DocNode.__str__(self) + ":<web:site>"
 
+    def getRootRelativeDirName(self):
+        return "html/"
+
 # --------------------------------------------------------------------    
 class DocPage(DocNode):
 # --------------------------------------------------------------------
@@ -243,7 +256,12 @@ class DocPage(DocNode):
             if c.isA(DocHtmlElement): continue
             code = code + c.render()
 
-        code = "<!-- name: %s -->\n<-- title: %s-->\n" % (self.name, self.title) + code
+        preamb = ""
+        preamb = preamb + "<!-- name: %s -->\n" % self.name
+        preamb = preamb + "<!-- title: %s -->\n" % self.title
+        preamb = preamb + "<!-- dirName: %s -->\n" % self.getRootRelativeDirName()
+
+        code = preamb + code
         return code
 
 # --------------------------------------------------------------------    
