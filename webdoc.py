@@ -2,36 +2,116 @@
 import xml.sax
 import xml.sax.saxutils
 import re
+import os
 import sys 
 import random
+import copy
+import htmlentitydefs
 
 from xml.sax.handler import ContentHandler
 from xml.sax         import parse
+from urlparse        import urlparse
+from urlparse        import urlunparse
 
-nodeIndex   = { }
+# this dictionary maps unicode characters to HTML entities
+mapUnicodeToHtmlEntity = { }
+for k, v in htmlentitydefs.entitydefs.iteritems():
+    mapUnicodeToHtmlEntity [v.decode('latin-1')] = u"&" + k.decode('latin-1') + u";"
 
-template = """
-<html>
-  <body>
-   %content;
-  </body>
-</html>
-"""
+nodeIndex = { }
 
-# --------------------------------------------------------------------    
-def getUniqueNodeID():
-# --------------------------------------------------------------------
-    "Generate an unique ID for a node"
+def getUniqueNodeID(id = None):
+    """
+    Generate an unique ID for a node.
+    """
+    if id is None: id = "id"
+    uniqueId = id
+    count = 0
     while 1:
-        id = "#%010d#" % int(random.random() * 1e10)
-        if id not in nodeIndex: break
-    return id
+        if uniqueId not in nodeIndex: break
+        count += 1
+        uniqueId = "%s-%d" % (id, count)
+    return uniqueId
 
-# --------------------------------------------------------------------    
 def dumpIndex():
-# --------------------------------------------------------------------
-    for (id, node) in nodeIndex.iteritems():
-      print node
+    """
+    Dump the node index, for debugging purposes.
+    """
+    for x in nodeIndex.itervalues():
+      print x
+
+def ensureDir(dirName):
+    """
+    Create the directory DIRNAME if it does not exsits.   
+    """
+    if os.path.isdir(dirName):
+        pass
+    elif os.path.isfile(dirName):
+        raise OSError("cannot create the direcory '%s'"
+                      "because there exists already "
+                      "a file with that name" % newdir)
+    else:
+        head, tail = os.path.split(dirName)
+        if head and not os.path.isdir(head):
+            ensureDir(head)
+        if tail:
+            os.mkdir(dirName)
+
+def calcRelURL(toURL, fromURL):
+    """
+    Calculates a relative URL.
+    """
+    fromURL  = urlparse(fromURL)
+    toURL    = urlparse(toURL)
+    if not fromURL.scheme == toURL.scheme: return toURL
+    if not fromURL.netloc == toURL.netloc: return toURL
+
+    fromPath = fromURL.path.split("/") 
+    toPath   = toURL.path.split("/")
+    for j in xrange(len(fromPath) - 1): fromPath[j] += "/"
+    for j in xrange(len(toPath)   - 1): toPath[j] += "/"
+
+    # abs path: ['/', 'dir1/', ..., 'dirN/', 'file'] 
+    # rel path: ['dir1/', ..., 'dirN/', 'file'] 
+    # path with no file: ['dir1/', ..., 'dirN/', '']
+
+    # remove common part from paths
+    i = 0
+    while True:
+        if i >= len(fromPath): break
+        if i >= len(toPath): break
+        if not fromPath[i] == toPath[i]: break
+        i = i + 1
+
+    # can remove the first chunks, and convert the others except the
+    # last one
+    for j in xrange(len(fromPath) - 1):
+        if len(fromPath[j]) > 1: fromPath[j] = "../"
+        else:                    fromPath[j] = ""
+
+    fromPath = fromPath[i:-1]
+    toPath = toPath[i:]
+    relPath = "".join(fromPath) + "".join(toPath)
+    
+    return urlunparse(["", "", relPath, "", "", toURL.fragment])
+
+def calcRelHref(href, baseNode = None):
+    """
+    Transforms HREF into an URL relative to BASENODE.  It also lookups
+    website IDs and correctly cross-references to them.
+    """
+    hrefURL = urlparse(href)
+    if hrefURL.scheme == "" and hrefURL.netloc == "" and \
+            nodeIndex.has_key(hrefURL.path):
+        node = nodeIndex[hrefURL.path]
+        relPath = node.getRelativePublishURL(baseNode)
+        hrefURL = ("",
+                   "",
+                   relPath,
+                   hrefURL.query,
+                   hrefURL.fragment,
+                   None)
+    return urlunparse(hrefURL)
 
 # --------------------------------------------------------------------    
 class DocParsingError(Exception):
@@ -51,17 +131,17 @@ class DocParsingError(Exception):
 # --------------------------------------------------------------------    
 class DocNode:
 # --------------------------------------------------------------------
-    def __init__(self, parent, attrs, URL, locator):
-        self.parent = parent
+    def __init__(self, attrs, URL, locator):
+        self.parent = None
         self.children = []
         self.attrs = attrs
         self.sourceURL = None
         self.sourceRow = None
         self.sourceColumn = None
         if attrs.has_key('id'):
-            self.id = attrs[id]
+            self.id = attrs['id']
         else:
-            self.id = getUniqueNodeID()
+            self.id = getUniqueNodeID()            
         if URL:
             if not URL is self.getSourceURL():
                 self.sourceURL = URL
@@ -70,16 +150,108 @@ class DocNode:
             self.sourceColumn = locator.getColumnNumber()
         nodeIndex[self.id] = self
 
+    def __str__(self):
+        return "%s:%d:%d:%s" % (self.getSourceURL(),
+                                self.getSourceRow(),
+                                self.getSourceColumn(),
+                                self.getID())
+
+    def dump(self):
+        """
+        Recusively dump the tree, for debugging purposes.
+        """
+        depth = self.getDepth()
+        print " " * depth, self
+        for x in self.children: x.dump()
+
+
     def isA(self, classInfo):
+        """
+        Returns TRUE if the node is of class CLASSINFO.
+        """
         return isinstance(self, classInfo)
 
-    def adopt(self, orfan):
-        self.children.append(orfan)
-
     def getID(self):
+        """
+        Returns the node ID
+        """
         return self.id
 
+    def getParent(self):
+        """
+        Return the node parent.
+        """
+        return self.parent
+
+    def getChildren(self):
+        """
+        Return the list of node children.
+        """
+        return self.children
+
+    def getDepth(self):
+        """
+        Return the depth of the node in the tree.
+        """
+        if self.parent:
+            return self.parent.getDepth() + 1
+        else:
+            return 0
+
+    def adopt(self, orfan):
+        """
+        Adds ORFAN to the node children and make the node the parent
+        of ORFAN.
+        """
+        self.children.append(orfan)
+        orfan.parent = self
+
+    def copy(self):
+        """
+        Makes a shallow copy of the node.
+        """
+        return copy.copy(self)
+
+    def recursiveCopy(self):
+        """
+        Makes a recursive copy of the node.
+        """
+        x = self.copy()
+        x.children = []
+        for y in self.children:
+            x.adopt(y.recursiveCopy())
+        return x
+
+    def findAncestors(self, nodeType = None):
+        """
+        Return the node ancestors of type NODETYPE. If NODETYPE is
+        None, returns all ancestors.
+        """
+        if nodeType is None:
+            nodeType = DocNode
+        if self.parent:
+            if self.parent.isA(nodeType):
+                found = [self.parent]
+            else:
+                found = []
+            found = found + self.parent.findAncestors(nodeType)
+            return found
+        return []
+
+    def findChildren(self, nodeType = None):
+        """
+        Returns the node chldren of type NODTYPE. If NODETYPE is None,
+        returns all children.
+        """
+        if nodeType is None:
+            nodeType = DocNode
+        return [x for x in self.children if x.isA(nodeType)]
+
     def getSourceURL(self):
+        """
+        Get the URL of the source code file where the node was
+        instantiated.
+        """
         if self.sourceURL: 
             return self.sourceURL
         elif self.parent:
@@ -88,6 +260,10 @@ class DocNode:
             return ""
         
     def getSourceColumn(self):
+        """
+        Gets the column of the source code file where the node was
+        instantiated.
+        """
         if not self.sourceColumn is None: 
             return self.sourceColumn 
         elif self.parent:
@@ -96,6 +272,10 @@ class DocNode:
             return -1 
 
     def getSourceRow(self):
+        """
+        Gets the row (line) of the source code file where the node was
+        instantiated.
+        """
         if not self.sourceRow is None: 
             return self.sourceRow 
         elif self.parent:
@@ -103,45 +283,84 @@ class DocNode:
         else:
             return -1
 
-    def getDepth(self):
-        if self.parent:
-            return self.parent.getDepth() + 1
-        else:
-            return 0
-
-    def __str__(self):
-        return "%s:%d:%d:%s" % (self.getSourceURL(),
-                                self.getSourceRow(),
-                                self.getSourceColumn(),
-                                self.getID())
-
-    def dump(self):
-        depth = self.getDepth()
-        print " " * depth, self
-        for x in self.children: x.dump()
-
     def makeParsingError(self, message):
+        """
+        Creates a DocParsingError with the specified message.  The
+        source code URL, row, and column are set to the node
+        corresponding values.
+        """
         return DocParsingError(
             self.getSourceURL(), 
             self.getSourceRow(),
             self.getSourceColumn(),
             message)
 
-    def render(self):
-        data = ""
-        for c in self.children:
-            data = data + c.render()
-        return data
-
-    def getRootRelativeDirName(self):
+    def drillIndex(self, branch = None):
+        """
+        Recusrively searches for the base of the index, and then makes
+        it.  While doing this, it records the visited nodes in BRANCH,
+        so that the correct index path can be opened when the index is
+        made.
+        """
+        if branch is None:
+            branch = [] 
+        branch.append(self)
         if self.parent:
-            return self.parent.getRootRelativeDirName()
+            return self.parent.drillIndex(branch)
+        return None
+
+    def makeIndex(self, branch):
+        """
+        Recusrively makes the HTML index, opening the branch BRANCH.
+        By default, it simply calls itself on all children.
+        """
+        html = []
+        [html.extend(c.makeIndex(branch)) for c in self.children]
+        return html
+
+    # ----------------------------------------------------------------
+    def getPublishDirName(self):
+        """
+        Returns the parent publish dir name.
+        """
+        if self.parent:
+            return self.parent.getPublishDirName()
+        return ""
+
+    def getPublishFileName(self):
+        """
+        Returns NONE.
+        """
+        return None
+
+    def getPublishURL(self):
+        """
+        Returns NONE.
+        """
+        return None
+
+    def getRelativePublishURL(self, fromNode = None):
+        """
+        Returns the publish URL relative to FROMNODE. If FROMNODE is
+        not specified, FROMNODE is set to the first ancestor of type
+        DocSite.
+        """
+        if fromNode is None:
+            fromNode = self.findAncestors(DocSite)[0]
+        return calcRelURL(self.getPublishURL(), fromNode.getPublishURL())
+
+    def publish(self):
+        """
+        Recusrively calls PUBLISH on its children.
+        """
+        [c.publish() for c in self.getChildren()]
+        return None
 
 # --------------------------------------------------------------------    
 class DocInclude(DocNode):
 # --------------------------------------------------------------------
-    def __init__(self, parent, attrs, URL, locator):
-        DocNode.__init__(self, parent, attrs, URL, locator)
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
         if not attrs.has_key("src"):
             raise self.makeParsingError("include missing 'src' attribute")
         self.fileName = attrs["src"]
@@ -153,8 +372,8 @@ class DocInclude(DocNode):
 # --------------------------------------------------------------------    
 class DocDir(DocNode):
 # --------------------------------------------------------------------
-    def __init__(self, parent, attrs, URL, locator):
-        DocNode.__init__(self, parent, attrs, URL, locator)
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
         if not attrs.has_key("name"):
             raise self.makeParsingError("dir tag missing 'name' attribute")
         self.dirName = attrs["name"]
@@ -163,31 +382,58 @@ class DocDir(DocNode):
         return DocNode.__str__(self) + ":<web:dir name='%s'>" \
             % xml.sax.saxutils.escape(self.dirName)
 
-    def getRootRelativeDirName(self):
-        str = ""
-        if self.parent:
-            str = self.parent.getRootRelativeDirName()
-        return str + self.dirName + "/"
+    def getPublishDirName(self):        
+        return self.parent.getPublishDirName() + self.dirName + "/"
 
 # --------------------------------------------------------------------    
-class DocText(DocNode):
+class DocHtmlContent(DocNode):
 # --------------------------------------------------------------------
-    def __init__(self, parent, data):
-        DocNode.__init__(self, parent, {}, None, None)
-        self.data = data
+    def xExpand(self, pageNode):
+        return None
+
+# --------------------------------------------------------------------    
+class DocText(DocHtmlContent):
+# --------------------------------------------------------------------
+    def __init__(self, text):
+        DocHtmlContent.__init__(self, {}, None, None)
+        self.text = text
 
     def __str__(self):        
-        return DocNode.__str__(self) + "text:'" + \
-            self.data.encode('utf-8').encode('string_escape') + "'"
+        return DocNode.__str__(self) + ":text:'" + \
+            self.text.encode('utf-8').encode('string_escape') + "'"
 
-    def render(self):
-        return self.data
+    def xExpand(self, pageNode):
+        expansion = []
+        last = 0
+        for m in re.finditer("%\w+;", self.text):
+            if last <= m.start() - 1:
+                textChunk = self.text[last : m.start() - 1]
+                expansion.append(DocText(textChunk))
+            last = m.end()
+
+            nodes = []
+            label = self.text [m.start() + 1 :m.end() - 1]
+            if label == "content":
+                [nodes.extend(x.xExpand(pageNode))
+                 for x in pageNode.getHtmlContent()]
+            elif label == "navigation":
+                nodes.extend(pageNode.drillIndex())
+            else:
+                print "warning: ignoring " + label
+            expansion.extend(nodes)
+        if last < len(self.text):
+            textChunk = self.text[last:]
+            expansion.append(DocText(textChunk))
+        return expansion
+
+    def toHtmlCode(self):
+        return xml.sax.saxutils.escape(self.text, mapUnicodeToHtmlEntity)
 
 # --------------------------------------------------------------------    
-class DocHtmlElement(DocNode):
+class DocHtmlElement(DocHtmlContent):
 # --------------------------------------------------------------------
-    def __init__(self, parent, tag, attrs, URL, locator):
-        DocNode.__init__(self, parent, attrs, URL, locator)
+    def __init__(self, tag, attrs, URL = None, locator = None):
+        DocHtmlContent.__init__(self, attrs, URL, locator)
         self.tag = tag
         
     def __str__(self):
@@ -197,44 +443,102 @@ class DocHtmlElement(DocNode):
         str = str + ">"
         return DocNode.__str__(self) + ":" + str
 
-    def render(self):
-        str = "<" + self.tag
+    def toHtmlCode(self):
+        htmlCode = "<" + self.tag
         for k, v in self.attrs.items():
-            str = str + " " + k + "='" + xml.sax.saxutils.escape(v) + "'"
-        str = str + ">\n"
-        str = str + DocNode.render(self)
-        str = str + "</" + self.tag + ">"
-        return str
+            if k == "href":
+                v = calcRelHref(v, self)
+            htmlCode = htmlCode + " " + k + "='" + xml.sax.saxutils.escape(v) + "'"
+        htmlCode = htmlCode + ">"
+        htmlCode = htmlCode + "".join(
+            [x.toHtmlCode() for x in self.findChildren(DocHtmlContent)])
+        htmlCode = htmlCode + "</" + self.tag + ">"
+        return htmlCode
+
+    def getPublishURL(self):
+        pageNode = self.findAncestors(DocPage)[0]
+        return pageNode.getPublishURL() + "#" + self.id
+
+    def xExpand(self, pageNode):
+        node = self.copy()
+        node.attrs = {}
+        for k, v in self.attrs.iteritems():
+            v_ = ""
+            last = 0
+            for m in re.finditer("%[\w:]+;", v):
+                if last <= m.start() - 1:
+                    v_ += v[last : m.start() - 1]
+                last = m.end()
+
+                directive = v [m.start() + 1 : m.end() - 1]                                
+                mo = re.match('pathto:(\w*)', directive)
+                print mo
+                if mo:
+                    id = mo.group(1)
+                    href = calcRelHref(id, self)
+                    print "***********", id, href
+                    v_ += href
+                else:
+                    raise self.makeParsingError('unknown directive ''%s''' % directive)
+            if last < len(v): v_ += v[last:]
+            node.attrs[k] = v_
+            print k, v_
+
+        node.children = [] 
+        for c in self.children:
+            [node.adopt(x) for x in c.xExpand(pageNode)]
+        return [node]
 
 # --------------------------------------------------------------------    
-class DocSite(DocNode):
+class DocWithHtmlContent(DocNode):
 # --------------------------------------------------------------------
-    def __init__(self, parent, attrs, URL, locator):
-        DocNode.__init__(self, parent, attrs, URL, locator)
+    def getHtmlContent(self):
+        return self.findChildren(DocHtmlContent)
+
+    def toHtmlCode(self):
+        return "".join([x.toHtmlCode() for x in self.getHtmlContent()])
+
+# --------------------------------------------------------------------    
+class DocExpandedContent(DocWithHtmlContent):
+# --------------------------------------------------------------------
+    def __init__(self):
+        DocWithHtmlContent.__init__(self, {}, None, None)
 
     def __str__(self):        
-        return DocNode.__str__(self) + ":<web:site>"
+        return DocNode.__str__(self) + ":<web:content>" \
+            % xml.sax.saxutils.escape(self.dirName)
 
-    def getRootRelativeDirName(self):
-        return "html/"
+    def publish(self):
+        pass
 
 # --------------------------------------------------------------------    
-class DocPage(DocNode):
+class DocTemplate(DocWithHtmlContent):
+# --------------------------------------------------------------------
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
+
+# --------------------------------------------------------------------    
+class DocPage(DocWithHtmlContent):
 # --------------------------------------------------------------------
     counter = 0
 
-    def __init__(self, parent, attrs, URL, locator):
-        DocNode.__init__(self, parent, attrs, URL, locator)
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
         DocPage.counter = 1 + DocPage.counter
-        self.title = "untitled"
+        self.templateID = "template.default"
         self.name  = "page%d" % DocPage.counter
+        self.title = "untitled"
 
         for k, v in self.attrs.items():
             if k == 'src':
                 self.title = v
-            if k == 'name':
+            elif k == 'name':
                 self.name = v
-            else:
+            elif k == 'id':
+                pass
+            elif k == 'title':
+                self.title = v        
+            else:                
                 raise self.makeParsingError("page cannot have '%s' attribute" % k)
 
     def __str__(self):        
@@ -242,27 +546,80 @@ class DocPage(DocNode):
             % (xml.sax.saxutils.escape(self.name), 
                xml.sax.saxutils.escape(self.title))
 
-    def render(self):
-        content = ""
+    def getPublishFileName(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        return self.name + ".html"
+
+    def getPublishURL(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        siteNode = self.findAncestors(DocSite)[0]
+        return siteNode.getPublishURL() + \
+            self.getPublishDirName() + \
+            self.getPublishFileName()
+
+    def publish(self):
+
+        templateNode = nodeIndex[self.templateID]
+
+        html =[] 
+        [html.extend(x.xExpand(self)) for x in templateNode.getHtmlContent()]
+
+        content = DocExpandedContent() 
+        [content.adopt(x) for x in html]
+        self.adopt(content)
+                
+        URL = self.getPublishURL()
+        dirName  = os.path.join('html', self.getPublishDirName())
+        fileName = self.getPublishFileName()
+        pathName = os.path.join(dirName, fileName)
+
+        # make directory
+        try:
+            ensureDir(dirName)
+        except Exception, (e):
+            raise self.makeParsingError("cannot create directory '%s'" % dirName)
+        print "writing page '%s' to '%s'" % (self.name, pathName)
+        f = open(pathName, "w")
+        f.write(content.toHtmlCode())
+        f.close()
+
+        # Do not forget to publish the rest
+        [x.publish() for x in self.getChildren() if not x.isA(DocHtmlContent)]
+
+        return None
+
+    # ----------------------------------------------------------------
+    def makeIndex(self, branch):
+        li = DocHtmlElement('li', {})
+        a = DocHtmlElement('a', {'href': self.id})
+        a.adopt(DocText(self.title))
+        li.adopt(a)
+        if self in branch:
+            ul = DocHtmlElement('ul', {})
+            for c in self.children:
+                [ul.adopt(x) for x in c.makeIndex(branch)]
+            li.adopt(ul)
+        return [li]
+
+# --------------------------------------------------------------------    
+class DocSite(DocNode):
+# --------------------------------------------------------------------
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
+        self.siteURL = "http://www.foo.org/"
+
+    def __str__(self):        
+        return DocNode.__str__(self) + ":<web:site>"
+
+    def getPublishURL(self):
+        return self.siteURL
+
+    def getPublishDirName(self):
+        return ""
+
+    def drillIndex(self, branch):
+        ul = DocHtmlElement('ul', {})
         for c in self.children:
-            if not c.isA(DocHtmlElement): continue
-            content = content + c.render()
-
-        code = template
-        code = re.sub("%content;", content, code)
-
-        # now subpages and other elements
-        for c in self.children:
-            if c.isA(DocHtmlElement): continue
-            code = code + c.render()
-
-        preamb = ""
-        preamb = preamb + "<!-- name: %s -->\n" % self.name
-        preamb = preamb + "<!-- title: %s -->\n" % self.title
-        preamb = preamb + "<!-- dirName: %s -->\n" % self.getRootRelativeDirName()
-
-        code = preamb + code
-        return code
+            [ul.adopt(x) for x in c.makeIndex(branch)]
+        return [ul]
 
 # --------------------------------------------------------------------    
 class DocHandler(ContentHandler):
@@ -276,7 +633,19 @@ class DocHandler(ContentHandler):
         self.fileNameStack = []
         self.verbosity = 1
 
+    def resolveEntity(self, publicid, systemid):
+        print "RESOLVE:", publicid, systemid        
+        return open(os.path.join('xhtml1/DTD', 
+                                 systemid[systemid.rfind('/')+1:]), "rb")
+
     def startElement(self, name, attrs): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+        # convert attrs to an actual dictionary
+        attrs_ = {}
+        for k, v in attrs.items():
+            attrs_[k] = v
+        attrs = attrs_
+        
         if name == "include":
             if not attrs.has_key("src"):
                 raise self.makeParsingError("include missing 'src' attribute")
@@ -296,13 +665,15 @@ class DocHandler(ContentHandler):
         node = None
 
         if   name == "site":
-            node = DocSite(parent, attrs, URL, locator)
+            node = DocSite(attrs, URL, locator)
         elif name == "page":
-            node = DocPage(parent, attrs, URL, locator)
+            node = DocPage(attrs, URL, locator)
         elif name == "dir":
-            node = DocDir(parent, attrs, URL, locator)
+            node = DocDir(attrs, URL, locator)
+        elif name == "template":
+            node = DocTemplate(attrs, URL, locator)
         else:
-            node = DocHtmlElement(parent, name, attrs, URL, locator)
+            node = DocHtmlElement(name, attrs, URL, locator)
             
         if parent: parent.adopt(node)
         self.stack.append(node)
@@ -316,7 +687,10 @@ class DocHandler(ContentHandler):
 
     def load(self, fileName): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         self.fileNameStack.append(fileName)
-        xml.sax.parse(fileName, self)
+        parser = xml.sax.make_parser()
+        parser.setContentHandler(self)
+        parser.setEntityResolver(self)
+        parser.parse(fileName)
 
     def setDocumentLocator(self, locator): # ~~~~~~~~~~~~~~~~~~~~~~~~~
         self.locatorStack.append(locator)
@@ -327,10 +701,13 @@ class DocHandler(ContentHandler):
         else:
             return None
 
-    def characters(self, content): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def characters(self, content):
         parent = self.stack[-1]
-        node = DocText(parent, content)
+        node = DocText(content)
         parent.adopt(node)
+
+    def ignorableWhitespace(self, ws):
+        self.characters(ws)
     
     def getCurrentFileName(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         return self.fileNameStack[-1]
@@ -346,7 +723,7 @@ if __name__ == '__main__':
     handler = DocHandler()
     try:
         handler.load(fileName)
-    except DocParsingError, (e):
+    except (DocParsingError, xml.sax.SAXParseException), (e):
         print e
         sys.exit(-1)
     print "== Index Content =="
@@ -355,6 +732,6 @@ if __name__ == '__main__':
     print "== Node Tree =="
     handler.rootNode.dump()    
 
-    print "== Render =="
-    print handler.rootNode.render()
+    print "== Publish =="
+    handler.rootNode.publish()
     sys.exit(0)
