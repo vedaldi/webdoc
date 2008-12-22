@@ -16,7 +16,8 @@ from urlparse        import urlunparse
 # this dictionary maps unicode characters to HTML entities
 mapUnicodeToHtmlEntity = { }
 for k, v in htmlentitydefs.entitydefs.iteritems():
-    mapUnicodeToHtmlEntity [v.decode('latin-1')] = u"&" + k.decode('latin-1') + u";"
+    if v == "&" or v == "<" or v == ">": continue
+    mapUnicodeToHtmlEntity [v.decode('latin-1')] = "&" + k.decode('latin-1') + u";"
 
 nodeIndex = { }
 
@@ -68,8 +69,8 @@ def calcRelURL(toURL, fromURL):
 
     fromPath = fromURL.path.split("/") 
     toPath   = toURL.path.split("/")
-    for j in xrange(len(fromPath) - 1): fromPath[j] += "/"
-    for j in xrange(len(toPath)   - 1): toPath[j] += "/"
+    for j in xrange(len(fromPath) - 1): fromPath[j] += u"/"
+    for j in xrange(len(toPath)   - 1): toPath[j] += u"/"
 
     # abs path: ['/', 'dir1/', ..., 'dirN/', 'file'] 
     # rel path: ['dir1/', ..., 'dirN/', 'file'] 
@@ -86,12 +87,12 @@ def calcRelURL(toURL, fromURL):
     # can remove the first chunks, and convert the others except the
     # last one
     for j in xrange(len(fromPath) - 1):
-        if len(fromPath[j]) > 1: fromPath[j] = "../"
-        else:                    fromPath[j] = ""
+        if len(fromPath[j]) > 1: fromPath[j] = u"../"
+        else:                    fromPath[j] = u""
 
     fromPath = fromPath[i:-1]
     toPath = toPath[i:]
-    relPath = "".join(fromPath) + "".join(toPath)
+    relPath = u"".join(fromPath) + "".join(toPath)
     
     return urlunparse(["", "", relPath, "", "", toURL.fragment])
 
@@ -201,10 +202,13 @@ class DocNode:
     def adopt(self, orfan):
         """
         Adds ORFAN to the node children and make the node the parent
-        of ORFAN.
+        of ORFAN. ORFAN can also be a sequence of orfans.
         """
-        self.children.append(orfan)
-        orfan.parent = self
+        if isinstance(orfan, DocNode):
+            self.children.append(orfan)
+            orfan.parent = self
+        else:
+            map(self.adopt, orfan)
 
     def copy(self):
         """
@@ -366,8 +370,8 @@ class DocInclude(DocNode):
         self.fileName = attrs["src"]
 
     def __str__(self):        
-        return DocNode.__str__(self) + ":<web:include src='%s'>" \
-            % xml.sax.saxutils.escape(self.fileName)
+        return DocNode.__str__(self) + ":<web:include src=%s>" \
+            % xml.sax.saxutils.quoteattr(self.fileName)
 
 # --------------------------------------------------------------------    
 class DocDir(DocNode):
@@ -379,8 +383,8 @@ class DocDir(DocNode):
         self.dirName = attrs["name"]
 
     def __str__(self):        
-        return DocNode.__str__(self) + ":<web:dir name='%s'>" \
-            % xml.sax.saxutils.escape(self.dirName)
+        return DocNode.__str__(self) + ":<web:dir name=%s>" \
+            % xml.sax.saxutils.quoteattr(self.dirName)
 
     def getPublishDirName(self):        
         return self.parent.getPublishDirName() + self.dirName + "/"
@@ -391,6 +395,12 @@ class DocHtmlContent(DocNode):
     def xExpand(self, pageNode):
         return None
 
+    def xCopy(self):
+        node = self.copy()
+        node.children = []
+        [node.adopt(x.xCopy()) for x in self.children]
+        return node
+
 # --------------------------------------------------------------------    
 class DocText(DocHtmlContent):
 # --------------------------------------------------------------------
@@ -400,7 +410,7 @@ class DocText(DocHtmlContent):
 
     def __str__(self):        
         return DocNode.__str__(self) + ":text:'" + \
-            self.text.encode('utf-8').encode('string_escape') + "'"
+            self.text.encode('utf-8').encode('string_escape') + "'" 
 
     def xExpand(self, pageNode):
         expansion = []
@@ -448,11 +458,10 @@ class DocHtmlElement(DocHtmlContent):
         for k, v in self.attrs.items():
             if k == "href":
                 v = calcRelHref(v, self)
-            htmlCode = htmlCode + " " + k + "='" + xml.sax.saxutils.escape(v) + "'"
-        htmlCode = htmlCode + ">"
-        htmlCode = htmlCode + "".join(
+            htmlCode += " " + k + "=" + xml.sax.saxutils.quoteattr(v, mapUnicodeToHtmlEntity)
+        htmlCode += ">" + "".join(
             [x.toHtmlCode() for x in self.findChildren(DocHtmlContent)])
-        htmlCode = htmlCode + "</" + self.tag + ">"
+        htmlCode += "</" + self.tag + ">"
         return htmlCode
 
     def getPublishURL(self):
@@ -472,21 +481,18 @@ class DocHtmlElement(DocHtmlContent):
 
                 directive = v [m.start() + 1 : m.end() - 1]                                
                 mo = re.match('pathto:(\w*)', directive)
-                print mo
                 if mo:
                     id = mo.group(1)
                     href = calcRelHref(id, self)
-                    print "***********", id, href
                     v_ += href
                 else:
                     raise self.makeParsingError('unknown directive ''%s''' % directive)
             if last < len(v): v_ += v[last:]
             node.attrs[k] = v_
-            print k, v_
 
         node.children = [] 
         for c in self.children:
-            [node.adopt(x) for x in c.xExpand(pageNode)]
+            node.adopt(c.xExpand(pageNode))
         return [node]
 
 # --------------------------------------------------------------------    
@@ -494,6 +500,11 @@ class DocWithHtmlContent(DocNode):
 # --------------------------------------------------------------------
     def getHtmlContent(self):
         return self.findChildren(DocHtmlContent)
+
+    def getCopyOfHtmlContent(self):
+        nodes = []
+        [nodes.append(x.xCopy()) for x in self.findChildren(DocHtmlContent)]
+        return nodes
 
     def toHtmlCode(self):
         return "".join([x.toHtmlCode() for x in self.getHtmlContent()])
@@ -559,13 +570,13 @@ class DocPage(DocWithHtmlContent):
 
         templateNode = nodeIndex[self.templateID]
 
-        html =[] 
-        [html.extend(x.xExpand(self)) for x in templateNode.getHtmlContent()]
-
-        content = DocExpandedContent() 
-        [content.adopt(x) for x in html]
+        content = DocExpandedContent()
+        [content.adopt(x) for x in templateNode.getCopyOfHtmlContent()]
         self.adopt(content)
-                
+
+        html = [] 
+        [html.extend(x.xExpand(self)) for x in content.getHtmlContent()]
+
         URL = self.getPublishURL()
         dirName  = os.path.join('html', self.getPublishDirName())
         fileName = self.getPublishFileName()
@@ -578,11 +589,11 @@ class DocPage(DocWithHtmlContent):
             raise self.makeParsingError("cannot create directory '%s'" % dirName)
         print "writing page '%s' to '%s'" % (self.name, pathName)
         f = open(pathName, "w")
-        f.write(content.toHtmlCode())
+        [f.write(x.toHtmlCode()) for x in html]
         f.close()
 
         # Do not forget to publish the rest
-        [x.publish() for x in self.getChildren() if not x.isA(DocHtmlContent)]
+        [x.publish() for x in self.findChildren(DocHtmlContent)]
 
         return None
 
@@ -625,7 +636,7 @@ class DocSite(DocNode):
 class DocHandler(ContentHandler):
 # --------------------------------------------------------------------
     
-    def __init__(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def __init__(self):
         ContentHandler.__init__(self)
         self.rootNode = None
         self.stack = []
@@ -634,12 +645,13 @@ class DocHandler(ContentHandler):
         self.verbosity = 1
 
     def resolveEntity(self, publicid, systemid):
-        print "RESOLVE:", publicid, systemid        
-        return open(os.path.join('xhtml1/DTD', 
+        """
+        Resolve XML entities by mapping to a local copy of the (X)HTML DTDs.
+        """
+        return open(os.path.join('dtd/xhtml1', 
                                  systemid[systemid.rfind('/')+1:]), "rb")
 
-    def startElement(self, name, attrs): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
+    def startElement(self, name, attrs):
         # convert attrs to an actual dictionary
         attrs_ = {}
         for k, v in attrs.items():
@@ -726,9 +738,9 @@ if __name__ == '__main__':
     except (DocParsingError, xml.sax.SAXParseException), (e):
         print e
         sys.exit(-1)
-    print "== Index Content =="
-    dumpIndex()
-    print
+    #print "== Index Content =="
+    # dumpIndex()
+    #print
     print "== Node Tree =="
     handler.rootNode.dump()    
 
