@@ -1,4 +1,8 @@
 #!/usr/bin/python
+## file:        webdoc.py
+## author:      Andrea Vedaldien
+## description: Implementation of webdoc.
+
 import xml.sax
 import xml.sax.saxutils
 import re
@@ -13,17 +17,19 @@ from xml.sax         import parse
 from urlparse        import urlparse
 from urlparse        import urlunparse
 
-# this dictionary maps unicode characters to HTML entities
+# Create a dictonary that maps unicode characters to HTML entities
 mapUnicodeToHtmlEntity = { }
 for k, v in htmlentitydefs.entitydefs.iteritems():
     if v == "&" or v == "<" or v == ">": continue
     mapUnicodeToHtmlEntity [v.decode('latin-1')] = "&" + k.decode('latin-1') + u";"
 
+# This indexes the document nodes by ID
 nodeIndex = { }
 
 def getUniqueNodeID(id = None):
     """
-    Generate an unique ID for a node.
+    getUniqueNodeID() generates an unique ID for a document node.
+    getUniqueNodeID(id) generates an unique ID adding a suffix to id.
     """
     if id is None: id = "id"
     uniqueId = id
@@ -190,6 +196,12 @@ class DocNode:
         """
         return self.children
 
+    def getAttributes(self):
+        """
+        Return the dictionary of node attributes.
+        """
+        return self.attrs
+
     def getDepth(self):
         """
         Return the depth of the node in the tree.
@@ -322,7 +334,6 @@ class DocNode:
         [html.extend(c.makeIndex(branch)) for c in self.children]
         return html
 
-    # ----------------------------------------------------------------
     def getPublishDirName(self):
         """
         Returns the parent publish dir name.
@@ -355,10 +366,38 @@ class DocNode:
 
     def publish(self):
         """
-        Recusrively calls PUBLISH on its children.
+        Recursively calls PUBLISH on its children.
         """
         [c.publish() for c in self.getChildren()]
         return None
+
+# --------------------------------------------------------------------    
+class Generator:
+# --------------------------------------------------------------------
+    def __init__(self, rootDir):
+        ensureDir(rootDir)
+        self.fileStack = []
+        self.dirStack = rootDir
+
+    def open(fileName):
+        filePath = os.path.join(self.dirStack[-1], fileName)
+        fid = open(filePath, "w")
+        self.fileStack.append(fid)
+        
+    def putString(str):
+        fid = self.fileStack[-1]
+        write(fid, str)
+    
+    def close():
+        close(self.fileStack.pop())
+        
+    def changeDir(dirName):
+        currentDir = os.dirStack[-1]
+        newDir = os.path.join(os.dirStack, dirName)
+        ensuredir(newDir)
+        
+    def parentDir():
+        os.dirStack.pop()
 
 # --------------------------------------------------------------------    
 class DocInclude(DocNode):
@@ -402,11 +441,13 @@ class DocHtmlContent(DocNode):
         return node
 
 # --------------------------------------------------------------------    
-class DocText(DocHtmlContent):
+class DocHtmlText(DocHtmlContent):
 # --------------------------------------------------------------------
-    def __init__(self, text):
+    def __init__(self, text, cdata = None):
         DocHtmlContent.__init__(self, {}, None, None)
+        if cdata is None: cdata = False
         self.text = text
+        self.cdata = cdata
 
     def __str__(self):        
         return DocNode.__str__(self) + ":text:'" + \
@@ -418,7 +459,7 @@ class DocText(DocHtmlContent):
         for m in re.finditer("%\w+;", self.text):
             if last <= m.start() - 1:
                 textChunk = self.text[last : m.start() - 1]
-                expansion.append(DocText(textChunk))
+                expansion.append(DocHtmlText(textChunk, cdata = self.cdata))
             last = m.end()
 
             nodes = []
@@ -426,18 +467,55 @@ class DocText(DocHtmlContent):
             if label == "content":
                 [nodes.extend(x.xExpand(pageNode))
                  for x in pageNode.getHtmlContent()]
+
+            elif label == "pagestyle":
+                for s in pageNode.findChildren(DocPageStyle):
+                    sa = s.getAttributes()
+                    if sa.has_key("type"):
+                        type = sa["type"]
+                    else:
+                        type = "text/css"
+                    if sa.has_key("href"):
+                        href = sa["href"]
+                        nodes.append(DocHtmlElement("link", {"href":href, "type":type, "rel":"stylesheet"}))
+                    h = s.findChildren(DocHtmlContent)
+                    if len(h) > 0:
+                        style = DocHtmlElement("style", {"type":type})
+                        [style.adopt(x.xExpand(pageNode)) for x in h]
+                        nodes.append(style)
+
+            elif label == "pagescript":
+                for s in pageNode.findChildren(DocPageScript):
+                    sa = s.getAttributes()
+                    if sa.has_key("type"):
+                        type = sa["type"]
+                    else:
+                        type = "text/javascript"
+                    if sa.has_key("src"):
+                        src = sa["src"]
+                        nodes.append(DocHtmlElement("script", {"src":src, "type":type}))
+                    h = s.findChildren(DocHtmlContent)
+                    if len(h) > 0:
+                        script = DocHtmlElement("script", {"type":type})
+                        [script.adopt(x.xExpand(pageNode)) for x in h]
+                        nodes.append(script)
+
             elif label == "navigation":
                 nodes.extend(pageNode.drillIndex())
+
             else:
                 print "warning: ignoring " + label
             expansion.extend(nodes)
         if last < len(self.text):
             textChunk = self.text[last:]
-            expansion.append(DocText(textChunk))
+            expansion.append(DocHtmlText(textChunk, cdata = self.cdata))
         return expansion
 
     def toHtmlCode(self):
-        return xml.sax.saxutils.escape(self.text, mapUnicodeToHtmlEntity)
+        if not self.cdata:
+            return xml.sax.saxutils.escape(self.text, mapUnicodeToHtmlEntity)
+        else:
+            return self.text.encode('utf-8')
 
 # --------------------------------------------------------------------    
 class DocHtmlElement(DocHtmlContent):
@@ -529,6 +607,18 @@ class DocTemplate(DocWithHtmlContent):
         DocNode.__init__(self, attrs, URL, locator)
 
 # --------------------------------------------------------------------    
+class DocPageStyle(DocWithHtmlContent):
+# --------------------------------------------------------------------
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
+
+# --------------------------------------------------------------------
+class DocPageScript(DocWithHtmlContent):
+# --------------------------------------------------------------------
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
+
+# --------------------------------------------------------------------    
 class DocPage(DocWithHtmlContent):
 # --------------------------------------------------------------------
     counter = 0
@@ -557,10 +647,10 @@ class DocPage(DocWithHtmlContent):
             % (xml.sax.saxutils.escape(self.name), 
                xml.sax.saxutils.escape(self.title))
 
-    def getPublishFileName(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getPublishFileName(self):
         return self.name + ".html"
 
-    def getPublishURL(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getPublishURL(self):
         siteNode = self.findAncestors(DocSite)[0]
         return siteNode.getPublishURL() + \
             self.getPublishDirName() + \
@@ -597,11 +687,10 @@ class DocPage(DocWithHtmlContent):
 
         return None
 
-    # ----------------------------------------------------------------
     def makeIndex(self, branch):
         li = DocHtmlElement('li', {})
         a = DocHtmlElement('a', {'href': self.id})
-        a.adopt(DocText(self.title))
+        a.adopt(DocHtmlText(self.title))
         li.adopt(a)
         if self in branch:
             ul = DocHtmlElement('ul', {})
@@ -643,6 +732,7 @@ class DocHandler(ContentHandler):
         self.locatorStack = []
         self.fileNameStack = []
         self.verbosity = 1
+        self.inCDATA = False
 
     def resolveEntity(self, publicid, systemid):
         """
@@ -684,6 +774,10 @@ class DocHandler(ContentHandler):
             node = DocDir(attrs, URL, locator)
         elif name == "template":
             node = DocTemplate(attrs, URL, locator)
+        elif name == "pagestyle":
+            node = DocPageStyle(attrs, URL, locator)
+        elif name == "pagescript":
+            node = DocPageScript(attrs, URL, locator)
         else:
             node = DocHtmlElement(name, attrs, URL, locator)
             
@@ -702,6 +796,7 @@ class DocHandler(ContentHandler):
         parser = xml.sax.make_parser()
         parser.setContentHandler(self)
         parser.setEntityResolver(self)
+        parser.setProperty(xml.sax.handler.property_lexical_handler, self)
         parser.parse(fileName)
 
     def setDocumentLocator(self, locator): # ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -715,7 +810,7 @@ class DocHandler(ContentHandler):
 
     def characters(self, content):
         parent = self.stack[-1]
-        node = DocText(content)
+        node = DocHtmlText(content, cdata = self.inCDATA)
         parent.adopt(node)
 
     def ignorableWhitespace(self, ws):
@@ -727,6 +822,18 @@ class DocHandler(ContentHandler):
     def endDocument(self):
         self.locatorStack.pop()
         self.fileNameStack.pop()
+
+    def startCDATA(self):
+        self.inCDATA = True
+
+    def endCDATA(self):
+        self.inCDATA = False
+
+    def comment(self, body): pass
+    def startEntity(self, name): pass
+    def endEntity(self, name): pass
+    def startDTD(self, name, public_id, system_id): pass
+    def endDTD(self): pass
 
 # --------------------------------------------------------------------    
 if __name__ == '__main__':
