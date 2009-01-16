@@ -4,6 +4,7 @@
 ## author:      Andrea Vedaldien
 ## description: Implementation of webdoc.
 
+import types
 import xml.sax
 import xml.sax.saxutils
 import re
@@ -18,15 +19,17 @@ from xml.sax         import parse
 from urlparse        import urlparse
 from urlparse        import urlunparse
 
-DOCTYPE_XHTML_TRANSITIONAL ="""<!DOCTYPE html 
-     PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
-     "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">"""
+DOCTYPE_XHTML_TRANSITIONAL = \
+    '<!DOCTYPE html PUBLIC ' \
+    '"-//W3C//DTD XHTML 1.0 Transitional//EN" ' \
+    '"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">'
 
 # Create a dictonary that maps unicode characters to HTML entities
 mapUnicodeToHtmlEntity = { }
-for k, v in htmlentitydefs.entitydefs.iteritems():
-    if v == "&" or v == "<" or v == ">": continue
-    mapUnicodeToHtmlEntity [v.decode('latin-1')] = "&" + k.decode('latin-1') + u";"
+for k, v in htmlentitydefs.name2codepoint.items():
+    c = unichr(v)
+    if c == u'&' or c == u'<' or c == u'>': continue
+    mapUnicodeToHtmlEntity [c] = "&%s;"  % k
 
 # This indexes the document nodes by ID
 nodeIndex = { }
@@ -136,6 +139,25 @@ class DocParsingError(Exception):
                                 self.rowNumber, 
                                 self.columnNumber, 
                                 self.message)
+
+# --------------------------------------------------------------------    
+# Better error reporting
+# --------------------------------------------------------------------    
+
+class makeGuard(object):
+    def __init__(self, func):
+        self.func = func
+
+    def __call__(self, obj, *args, **keys):
+        try:
+            self.func(obj, *args, **keys)
+        except DocParsingError:
+            raise
+        except Exception, e:
+            raise obj.makeParsingError(e.__str__())
+
+    def __get__(self, obj, type=None):
+        return types.MethodType(self, obj, type)
 
 # --------------------------------------------------------------------    
 class DocNode:
@@ -384,14 +406,14 @@ class Generator:
         self.fileStack = []
         self.dirStack = [rootDir]
         ensureDir(rootDir)
-        print "CD ", rootDir
+        #print "CD ", rootDir
 
     def open(self, fileName):
         filePath = os.path.join(self.dirStack[-1], fileName)
         fid = open(filePath, "w")
         self.fileStack.append(fid)
         fid.write(DOCTYPE_XHTML_TRANSITIONAL)
-        print "OPEN ", filePath
+        #print "OPEN ", filePath
         
     def putString(self, str):
         fid = self.fileStack[-1]
@@ -400,7 +422,12 @@ class Generator:
     def putXMLString(self, str):
         fid = self.fileStack[-1]
         xstr = xml.sax.saxutils.escape(str, mapUnicodeToHtmlEntity)
-        fid.write(xstr.encode('latin-1'))
+        try:
+            fid.write(xstr.encode('latin-1'))
+        except:
+            print "OFFENDING", str, xstr
+            print mapUnicodeToHtmlEntity[str]
+            raise
 
     def putXMLAttr(self, str):
         fid = self.fileStack[-1]
@@ -409,18 +436,18 @@ class Generator:
     
     def close(self):
         self.fileStack.pop().close()
-        print "CLOSE"
+        #print "CLOSE"
         
     def changeDir(self, dirName):
         currentDir = self.dirStack[-1]
         newDir = os.path.join(currentDir, dirName)
         ensureDir(newDir)
         self.dirStack.append(newDir)
-        print "CD ", newDir
+        #print "CD ", newDir
         
     def parentDir(self):
         self.dirStack.pop()
-        print "CD .."
+        #print "CD .."
 
 # --------------------------------------------------------------------    
 class DocInclude(DocNode):
@@ -456,6 +483,17 @@ class DocDir(DocNode):
         DocNode.publish(self, generator, pageNode)
         generator.parentDir()
 
+    publish = makeGuard(publish)
+
+# --------------------------------------------------------------------    
+class DocGroup(DocNode):
+# --------------------------------------------------------------------
+    def __init__(self, attrs, URL, locator):
+        DocNode.__init__(self, attrs, URL, locator)
+
+    def __str__(self):        
+        return DocNode.__str__(self) + ":<web:group>"
+
 # --------------------------------------------------------------------    
 class DocCDATAText(DocNode):
 # --------------------------------------------------------------------
@@ -471,6 +509,8 @@ class DocCDATAText(DocNode):
         if not pageNode: return
         gen.putString(self.text)
 
+    publish = makeGuard(publish)
+
 # --------------------------------------------------------------------    
 class DocCDATA(DocNode):
 # --------------------------------------------------------------------
@@ -485,6 +525,8 @@ class DocCDATA(DocNode):
         gen.putString("<![CDATA[")
         DocNode.publish(self, gen, pageNode)
         gen.putString(">]") ;
+
+    publish = makeGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocHtmlText(DocNode):
@@ -524,10 +566,15 @@ class DocHtmlText(DocNode):
                 siteNode.publishIndex(gen, pageNode, openNodeStack)
                 gen.putString("</ul>\n")
 
+            elif directive == "pagetitle":
+                gen.putString(pageNode.title)
+
             else:
                 print "warning: ignoring directive " + label            
         if last < len(self.text):
             gen.putXMLString(self.text[last:])
+
+    publish = makeGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocHtmlElement(DocNode):
@@ -661,9 +708,8 @@ class DocPage(DocNode):
             templateNode.publish(generator, self)
             generator.close()
             DocNode.publish(self, generator, None)
-        else:
+        elif pageNode is self:
             DocNode.publish(self, generator, pageNode)
-        return
 
     def publishIndex(self, gen, pageNode, openNodeStack):
         gen.putString("<li><a href=")
@@ -671,14 +717,12 @@ class DocPage(DocNode):
             expandAttr("%%pathto:%s;" % self.getID(), pageNode))
         gen.putString(">")
         gen.putXMLString(self.title)
-        gen.putString("</a></li>\n<ul>\n")
-        print self, openNodeStack
+        gen.putString("</a>\n<ul>\n")
         if len(openNodeStack) > 0 and self == openNodeStack[-1]:
             openNodeStack.pop()
-            DocNode.publishIndex(self, gen, pageNode, openNodeStack)
-            
-        gen.putString("</ul>\n")
-        return
+            DocNode.publishIndex(self, gen, pageNode, openNodeStack)            
+        gen.putString("</ul></li>\n")
+
 
 # --------------------------------------------------------------------    
 class DocSite(DocNode):
@@ -700,6 +744,7 @@ class DocSite(DocNode):
         generator = Generator("html") 
         DocNode.publish(self, generator)
 
+
 # --------------------------------------------------------------------    
 class DocHandler(ContentHandler):
 # --------------------------------------------------------------------
@@ -711,6 +756,7 @@ class DocHandler(ContentHandler):
         self.locatorStack = []
         self.fileNameStack = []
         self.verbosity = 1
+        self.inDTD = False
 
     def resolveEntity(self, publicid, systemid):
         """
@@ -757,20 +803,22 @@ class DocHandler(ContentHandler):
             node = DocPageStyle(attrs, URL, locator)
         elif name == "pagescript":
             node = DocPageScript(attrs, URL, locator)
+        elif name == "group":
+            node = DocGroup(attrs, URL, locator)
         else:
             node = DocHtmlElement(name, attrs, URL, locator)
             
         if parent: parent.adopt(node)
         self.stack.append(node)
         
-    def endElement(self, name): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def endElement(self, name):
         if name == "include":
             return
         node = self.stack.pop()
         if len(self.stack) == 0:
             self.rootNode = node
 
-    def load(self, fileName): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def load(self, fileName):
         self.fileNameStack.append(fileName)
         parser = xml.sax.make_parser()
         parser.setContentHandler(self)
@@ -778,10 +826,10 @@ class DocHandler(ContentHandler):
         parser.setProperty(xml.sax.handler.property_lexical_handler, self)
         parser.parse(fileName)
 
-    def setDocumentLocator(self, locator): # ~~~~~~~~~~~~~~~~~~~~~~~~~
+    def setDocumentLocator(self, locator):
         self.locatorStack.append(locator)
 
-    def getCurrentLocator(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getCurrentLocator(self):
         if len(self.locatorStack) > 0:
             return self.locatorStack[-1]
         else:
@@ -798,7 +846,7 @@ class DocHandler(ContentHandler):
     def ignorableWhitespace(self, ws):
         self.characters(ws)
     
-    def getCurrentFileName(self): # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getCurrentFileName(self):
         return self.fileNameStack[-1]
 
     def endDocument(self):
@@ -806,13 +854,8 @@ class DocHandler(ContentHandler):
         self.fileNameStack.pop()
 
     def startCDATA(self):
-        URL = self.getCurrentFileName()
-        locator = self.getCurrentLocator()
-
-        node = DocCDATA() ;
-        if len(self.stack) > 0: 
-            parent = self.stack[-1]
-            parent.adopt(node)
+        node = DocCDATA() 
+        self.stack[-1].adopt(node)
         self.stack.append(node)
 
     def endCDATA(self):
@@ -820,11 +863,19 @@ class DocHandler(ContentHandler):
         if len(self.stack) == 0:
             self.rootNode = node
 
-    def comment(self, body): pass
+    def comment(self, body):
+        if self.inDTD: return
+        node = DocCDATAText("<!--" + body + "-->")
+        self.stack[-1].adopt(node)
+        
     def startEntity(self, name): pass
     def endEntity(self, name): pass
-    def startDTD(self, name, public_id, system_id): pass
-    def endDTD(self): pass
+
+    def startDTD(self, name, public_id, system_id):
+        self.inDTD = True
+    
+    def endDTD(self):
+        self.inDTD = False
 
 # --------------------------------------------------------------------    
 if __name__ == '__main__':
@@ -839,13 +890,17 @@ if __name__ == '__main__':
     #print "== Index Content =="
     # dumpIndex()
     #print
-    print "== Node Tree =="
-    handler.rootNode.dump()    
+    #print "== Node Tree =="
+    #handler.rootNode.dump()    
 
     print "== All pages =="
     for x in walkNodes(handler.rootNode, DocPage):
         print x
 
     print "== Publish =="
-    handler.rootNode.publish()
+    try:
+        handler.rootNode.publish()
+    except (DocParsingError, xml.sax.SAXParseException), (e):
+        print e
+        sys.exit(-1)
     sys.exit(0)
