@@ -160,7 +160,36 @@ class makeGuard(object):
         return types.MethodType(self, obj, type)
 
 # --------------------------------------------------------------------    
-class DocNode:
+class DocBareNode:
+# --------------------------------------------------------------------
+    """
+    A node of the document tree without parent, childnren, or any
+    other attribute. It is used to implement frequent leaf nodes such
+    as text chunks.
+    """
+    def __init__(self): pass
+
+    def isA(self, classInfo):
+        """
+        Returns TRUE if the node is of class CLASSINFO.
+        """
+        return isinstance(self, classInfo)
+
+    def getChildren(self):
+        """
+        Returs an empty list
+        """
+        return []
+
+    def setParent(self, parent): pass
+    def getPublishDirName(self): pass
+    def getPublishFileName(self): pass
+    def getPublishURL(self): pass
+    def publish(self, generator, pageNode = None): pass
+    def publishIndex(self, gen, pageNode, openNodeStack): pass
+
+# --------------------------------------------------------------------    
+class DocNode(DocBareNode):
 # --------------------------------------------------------------------
     def __init__(self, attrs, URL, locator):
         self.parent = None
@@ -196,11 +225,6 @@ class DocNode:
         for x in self.children: x.dump()
 
 
-    def isA(self, classInfo):
-        """
-        Returns TRUE if the node is of class CLASSINFO.
-        """
-        return isinstance(self, classInfo)
 
     def getID(self):
         """
@@ -235,32 +259,19 @@ class DocNode:
         else:
             return 0
 
+    def setParent(self, parent):
+        """
+        Set the parent of the node.
+        """
+        self.parent = parent
+
     def adopt(self, orfan):
         """
         Adds ORFAN to the node children and make the node the parent
         of ORFAN. ORFAN can also be a sequence of orfans.
         """
-        if isinstance(orfan, DocNode):
-            self.children.append(orfan)
-            orfan.parent = self
-        else:
-            map(self.adopt, orfan)
-
-    def copy(self):
-        """
-        Makes a shallow copy of the node.
-        """
-        return copy.copy(self)
-
-    def recursiveCopy(self):
-        """
-        Makes a recursive copy of the node.
-        """
-        x = self.copy()
-        x.children = []
-        for y in self.children:
-            x.adopt(y.recursiveCopy())
-        return x
+        self.children.append(orfan)
+        orfan.setParent(self)
 
     def findAncestors(self, nodeType = None):
         """
@@ -384,6 +395,7 @@ def expandAttr(value, pageNode):
         mo = re.match('pathto:(\w*)', directive)
         if mo: 
             toNodeID = mo.group(1)
+            toNodeURL = None
             if nodeIndex.has_key(toNodeID):
                 toNodeURL = nodeIndex[toNodeID].getPublishURL()
             if toNodeURL is None:
@@ -495,10 +507,10 @@ class DocGroup(DocNode):
         return DocNode.__str__(self) + ":<web:group>"
 
 # --------------------------------------------------------------------    
-class DocCDATAText(DocNode):
+class DocCDATAText(DocBareNode):
 # --------------------------------------------------------------------
     def __init__(self, text):
-        DocNode.__init__(self, {}, None, None)
+        DocBareNode.__init__(self)
         self.text = text
 
     def __str__(self):        
@@ -529,10 +541,10 @@ class DocCDATA(DocNode):
     publish = makeGuard(publish)
 
 # --------------------------------------------------------------------    
-class DocHtmlText(DocNode):
+class DocHtmlText(DocBareNode):
 # --------------------------------------------------------------------
     def __init__(self, text):
-        DocNode.__init__(self, {}, None, None)
+        DocBareNode.__init__(self)
         self.text = text
 
     def __str__(self):        
@@ -760,9 +772,11 @@ class DocHandler(ContentHandler):
 
     def resolveEntity(self, publicid, systemid):
         """
-        Resolve XML entities by mapping to a local copy of the (X)HTML DTDs.
+        Resolve XML entities by mapping to a local copy of the (X)HTML
+        DTDs.
         """
         return open(os.path.join(
+                os.path.dirname(__file__),
                 'dtd/xhtml1', 
                 systemid[systemid.rfind('/')+1:]), "rb")
 
