@@ -93,8 +93,8 @@ def calcRelURL(toURL, fromURL):
     # remove common part from paths
     i = 0
     while True:
-        if i >= len(fromPath): break
-        if i >= len(toPath): break
+        if i >= len(fromPath) - 1: break
+        if i >= len(toPath) - 1: break
         if not fromPath[i] == toPath[i]: break
         i = i + 1
 
