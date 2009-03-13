@@ -18,6 +18,29 @@ from xml.sax.handler import ContentHandler
 from xml.sax         import parse
 from urlparse        import urlparse
 from urlparse        import urlunparse
+from optparse        import OptionParser
+
+usage = """webdoc [OPTIONS...] <DOC.XML>
+
+--outdir   Set output directory
+--verbose  Be verbose
+"""
+
+parser = OptionParser(usage=usage)
+
+parser.add_option(
+    "-v", "--verbose", 
+    dest    = "verb",
+    default = False,
+    action  = "store_true",
+    help    = "print debug informations")
+
+parser.add_option(
+    "-o", "--outdir", 
+    dest    = "outdir",
+    default = "html",
+    action  = "store",
+    help    = "write output to this directory")
 
 DOCTYPE_XHTML_TRANSITIONAL = \
     '<!DOCTYPE html PUBLIC ' \
@@ -126,6 +149,15 @@ def walkAncestors(leafNode, nodeType = None):
             yield m
 
 # --------------------------------------------------------------------    
+class DocBareParsingError(Exception):
+# --------------------------------------------------------------------
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+# --------------------------------------------------------------------    
 class DocParsingError(Exception):
 # --------------------------------------------------------------------
     def __init__(self, URL, row, column, message):
@@ -144,6 +176,23 @@ class DocParsingError(Exception):
 # Better error reporting
 # --------------------------------------------------------------------    
 
+class makeBareGuard(object):
+    def __init__(self, func):
+        self.func = func
+
+    def __call__(self, obj, *args, **keys):
+        try:
+            self.func(obj, *args, **keys)
+        except DocParsingError:
+            raise
+        except DocBareParsingError:
+            raise
+        except Exception, e:
+            raise obj.makeBareParsingError(e.__str__())
+
+    def __get__(self, obj, type=None):
+        return types.MethodType(self, obj, type)
+
 class makeGuard(object):
     def __init__(self, func):
         self.func = func
@@ -153,6 +202,8 @@ class makeGuard(object):
             self.func(obj, *args, **keys)
         except DocParsingError:
             raise
+        except DocBareParsingError, e:
+            raise obj.makeParsingError(e.message)
         except Exception, e:
             raise obj.makeParsingError(e.__str__())
 
@@ -188,9 +239,13 @@ class DocBareNode:
     def publish(self, generator, pageNode = None): pass
     def publishIndex(self, gen, pageNode, openNodeStack): return False
 
-    def makeParsingError(self, message):
-        return DocParsingError(
-            "", 0, 0, message)
+    def makeBareParsingError(self, message):
+        """
+        Creates a DocParsingError with the specified message.  The
+        source code URL, row, and column are set to the node
+        corresponding values.
+        """
+        return DocBareParsingError(message)
 
 # --------------------------------------------------------------------    
 class DocNode(DocBareNode):
@@ -410,7 +465,7 @@ def expandAttr(value, pageNode):
             fromPageURL = pageNode.getPublishURL()
             xvalue += calcRelURL(toNodeURL, fromPageURL)
         else:
-            raise self.makeParsingError(
+            raise DocBareParsingError(
                 "Unknown directive '%s' while expanding attribute" % directive)
     if last < len(value): xvalue += value[last:]
     #print "EXPAND: ", value, " -> ", xvalue
@@ -426,8 +481,8 @@ class Generator:
         ensureDir(rootDir)
         #print "CD ", rootDir
 
-    def open(self, fileName):
-        filePath = os.path.join(self.dirStack[-1], fileName)
+    def open(self, filePath):
+        filePath = os.path.join(self.dirStack[-1], filePath)
         fid = open(filePath, "w")
         self.fileStack.append(fid)
         fid.write(DOCTYPE_XHTML_TRANSITIONAL)
@@ -482,11 +537,11 @@ class DocInclude(DocNode):
         DocNode.__init__(self, attrs, URL, locator)
         if not attrs.has_key("src"):
             raise self.makeParsingError("include missing 'src' attribute")
-        self.fileName = attrs["src"]
+        self.filePath = attrs["src"]
 
     def __str__(self):        
         return DocNode.__str__(self) + ":<web:include src=%s>" \
-            % xml.sax.saxutils.quoteattr(self.fileName)
+            % xml.sax.saxutils.quoteattr(self.filePath)
 
 # --------------------------------------------------------------------    
 class DocDir(DocNode):
@@ -535,7 +590,7 @@ class DocCDATAText(DocBareNode):
         if not pageNode: return
         gen.putString(self.text)
 
-    publish = makeGuard(publish)
+    publish = makeBareGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocCDATA(DocNode):
@@ -550,7 +605,7 @@ class DocCDATA(DocNode):
         if pageNode is None: return
         gen.putString("<![CDATA[")
         DocNode.publish(self, gen, pageNode)
-        gen.putString(">]") ;
+        gen.putString("]]>") ;
 
     publish = makeGuard(publish)
 
@@ -600,7 +655,7 @@ class DocHtmlText(DocBareNode):
         if last < len(self.text):
             gen.putXMLString(self.text[last:])
 
-    publish = makeGuard(publish)
+    publish = makeBareGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocHtmlElement(DocNode):
@@ -636,6 +691,8 @@ class DocHtmlElement(DocNode):
         gen.putString(self.tag)
         gen.putString(">")
 
+    publish = makeGuard(publish)
+
 # --------------------------------------------------------------------    
 class DocTemplate(DocNode):
 # --------------------------------------------------------------------
@@ -645,6 +702,8 @@ class DocTemplate(DocNode):
     def publish(self, generator, pageNode = None):
         if pageNode is None: return
         DocNode.publish(self, generator, pageNode)
+
+    publish = makeGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocPageStyle(DocNode):
@@ -667,6 +726,8 @@ class DocPageStyle(DocNode):
         DocNode.publish(self, gen, pageNode)
         gen.putString("</style>")
 
+    publish = makeGuard(publish)
+
 # --------------------------------------------------------------------
 class DocPageScript(DocNode):
 # --------------------------------------------------------------------
@@ -688,6 +749,8 @@ class DocPageScript(DocNode):
         DocNode.publish(self, gen, pageNode)
         gen.putString("</script>")
 
+    publish = makeGuard(publish)
+
 # --------------------------------------------------------------------    
 class DocPage(DocNode):
 # --------------------------------------------------------------------
@@ -699,6 +762,7 @@ class DocPage(DocNode):
         self.templateID = "template.default"
         self.name  = "page%d" % DocPage.counter
         self.title = "untitled"
+        self.hide = False
 
         for k, v in self.attrs.items():
             if k == 'src':
@@ -709,6 +773,8 @@ class DocPage(DocNode):
                 pass
             elif k == 'title':
                 self.title = v
+            elif k == 'hide':
+                self.hide = (v.lower() == 'yes')
             else:   
                 raise self.makeParsingError(
                     "web:page cannot have '%s' attribute" % k)
@@ -738,6 +804,7 @@ class DocPage(DocNode):
             DocNode.publish(self, generator, pageNode)
 
     def publishIndex(self, gen, pageNode, openNodeStack):
+        if self.hide: return
         gen.putString("<li><a href=")
         gen.putXMLAttr(
             expandAttr("%%pathto:%s;" % self.getID(), pageNode))
@@ -759,12 +826,15 @@ class DocPage(DocNode):
         gen.putString("</li>\n")
         return True
 
+    publish = makeGuard(publish)
+
 # --------------------------------------------------------------------    
 class DocSite(DocNode):
 # --------------------------------------------------------------------
     def __init__(self, attrs, URL, locator):
         DocNode.__init__(self, attrs, URL, locator)
         self.siteURL = "http://www.foo.org/"
+        self.outDir = "html"
 
     def __str__(self):        
         return DocNode.__str__(self) + ":<web:site>"
@@ -775,10 +845,17 @@ class DocSite(DocNode):
     def getPublishDirName(self):
         return ""
 
+    def getOutDir(self):
+        return self.outDir
+
+    def setOutDir(self, outDir):
+        self.outDir = outDir
+
     def publish(self):
-        generator = Generator("html") 
+        generator = Generator(self.outDir) 
         DocNode.publish(self, generator)
 
+    publish = makeGuard(publish)
 
 # --------------------------------------------------------------------    
 class DocHandler(ContentHandler):
@@ -789,7 +866,7 @@ class DocHandler(ContentHandler):
         self.rootNode = None
         self.stack = []
         self.locatorStack = []
-        self.fileNameStack = []
+        self.filePathStack = []
         self.verbosity = 1
         self.inDTD = False
 
@@ -803,24 +880,48 @@ class DocHandler(ContentHandler):
                 'dtd/xhtml1', 
                 systemid[systemid.rfind('/')+1:]), "rb")
 
+    def lookupFile(self, filePath):
+        if os.path.exists(filePath):
+            return filePath
+        if filePath[0] == '/':
+            return None
+        for path in self.filePathStack:
+            dir = os.path.dirname(path)
+            qualFilePath = os.path.join(dir, filePath)
+            if os.path.exists(qualFilePath):
+                return qualFilePath
+        return None
+
     def startElement(self, name, attrs):
         # convert attrs to an actual dictionary
         attrs_ = {}
         for k, v in attrs.items():
             attrs_[k] = v
         attrs = attrs_
-        
-        if name == "include":
-            if not attrs.has_key("src"):
-                raise self.makeParsingError("include missing 'src' attribute")
-            fileName = attrs["src"]
-            if self.verbosity > 0:
-                print "sourcing '%s'" % fileName
-            self.load(fileName)
-            return
 
         URL = self.getCurrentFileName()
         locator = self.getCurrentLocator()
+
+        
+        if name == "include":
+            if not attrs.has_key("src"):
+                raise DocParsingError(
+                    URL, 
+                    locator.getLineNumber(), 
+                    locator.getColumnNumber(),
+                    "<web:include> missing 'src' attribute")
+            filePath = attrs["src"]
+            qualFilePath = self.lookupFile(filePath)
+            if qualFilePath is None:
+                raise DocParsingError(
+                    URL, 
+                    locator.getLineNumber(), 
+                    locator.getColumnNumber(),
+                    "<web:include> could not find file '%s'" % filePath)
+            if self.verbosity > 0:
+                print "parsing '%s'" % qualFilePath
+            self.load(qualFilePath)
+            return
 
         if len(self.stack) == 0:
             parent = None
@@ -855,13 +956,13 @@ class DocHandler(ContentHandler):
         if len(self.stack) == 0:
             self.rootNode = node
 
-    def load(self, fileName):
-        self.fileNameStack.append(fileName)
+    def load(self, qualFilePath):
+        self.filePathStack.append(qualFilePath)
         parser = xml.sax.make_parser()
         parser.setContentHandler(self)
         parser.setEntityResolver(self)
         parser.setProperty(xml.sax.handler.property_lexical_handler, self)
-        parser.parse(fileName)
+        parser.parse(qualFilePath)
 
     def setDocumentLocator(self, locator):
         self.locatorStack.append(locator)
@@ -884,11 +985,11 @@ class DocHandler(ContentHandler):
         self.characters(ws)
     
     def getCurrentFileName(self):
-        return self.fileNameStack[-1]
+        return self.filePathStack[-1]
 
     def endDocument(self):
         self.locatorStack.pop()
-        self.fileNameStack.pop()
+        self.filePathStack.pop()
 
     def startCDATA(self):
         node = DocCDATA() 
@@ -917,13 +1018,19 @@ class DocHandler(ContentHandler):
 # --------------------------------------------------------------------    
 if __name__ == '__main__':
 # --------------------------------------------------------------------
-    fileName = sys.argv[1]
+    (opts, args) = parser.parse_args()
+
+    filePath = args[0]
     handler = DocHandler()
     try:
-        handler.load(fileName)
+        handler.load(filePath)
     except (DocParsingError, xml.sax.SAXParseException), (e):
         print e
         sys.exit(-1)
+
+    # configure
+    handler.rootNode.setOutDir(opts.outdir)
+
     #print "== Index Content =="
     # dumpIndex()
     #print
