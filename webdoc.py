@@ -90,7 +90,7 @@ def calcRelURL(toURL, fromURL):
     # rel path: ['dir1/', ..., 'dirN/', 'file'] 
     # path with no file: ['dir1/', ..., 'dirN/', '']
 
-    # remove common part from paths
+    # find common path (but do not count file name)
     i = 0
     while True:
         if i >= len(fromPath) - 1: break
@@ -98,8 +98,8 @@ def calcRelURL(toURL, fromURL):
         if not fromPath[i] == toPath[i]: break
         i = i + 1
 
-    # can remove the first chunks, and convert the others except the
-    # last one
+    # a/b/c/d.html  --> ../../../d.html
+    # a/b//c/d.html --> ../../../d.html
     for j in xrange(len(fromPath) - 1):
         if len(fromPath[j]) > 1: fromPath[j] = u"../"
         else:                    fromPath[j] = u""
