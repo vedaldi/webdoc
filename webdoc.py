@@ -674,7 +674,7 @@ class DocHtmlElement(DocNode):
     def getPublishURL(self):
         anc = self.findAncestors(DocPage)
         if len(anc) == 0: return None
-        return anc[0].getPublishURL() + "#" + self.id + ".html"
+        return anc[0].getPublishURL() + "#" + self.id
 
     def publish(self, gen, pageNode = None):
         if pageNode is None: return
