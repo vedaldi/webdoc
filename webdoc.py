@@ -447,14 +447,14 @@ class DocNode(DocBareNode):
 def expandAttr(value, pageNode):
 # --------------------------------------------------------------------
     xvalue = ""
-    last = 0
+    next = 0
     for m in re.finditer("%[-\w._#:]+;", value):
-        if last <= m.start() - 1:
-            xvalue += value[last:m.start()-1]
-        last = m.end()
+        if next < m.start():
+            xvalue += value[next : m.start()]
+        next = m.end()
         directive = value[m.start()+1 : m.end()-1]
         mo = re.match('pathto:(.*)', directive)
-        if mo: 
+        if mo:
             toNodeID = mo.group(1)
             toNodeURL = None
             if nodeIndex.has_key(toNodeID):
@@ -467,7 +467,7 @@ def expandAttr(value, pageNode):
         else:
             raise DocBareParsingError(
                 "Unknown directive '%s' while expanding attribute" % directive)
-    if last < len(value): xvalue += value[last:]
+    if next < len(value): xvalue += value[next:]
     #print "EXPAND: ", value, " -> ", xvalue
     return xvalue
 
@@ -622,11 +622,13 @@ class DocHtmlText(DocBareNode):
 
     def publish(self, gen, pageNode = None):
         if pageNode is None: return
-        last = 0
+        # find occurences of %directive; in the text node and do the
+        # appropriate substitutions
+        next = 0
         for m in re.finditer("%\w+;", self.text):
-            if last <= m.start() - 1:
-                gen.putXMLString(self.text[last : m.start()-1])
-            last = m.end()            
+            if next < m.start():
+                gen.putXMLString(self.text[next : m.start()])
+            next = m.end()
             directive = self.text[m.start()+1 : m.end()-1]
 
             if   directive == "content":
@@ -640,6 +642,14 @@ class DocHtmlText(DocBareNode):
                 for s in pageNode.findChildren(DocPageScript):
                     s.publish(gen, pageNode)
 
+            elif directive == "pagetitle":
+                gen.putString(pageNode.title)
+
+            elif directive == "path":
+                ancPages = [x for x in walkAncestors(pageNode, DocPage)]
+                ancPages.reverse()
+                gen.putString(" - ".join([x.title for x in ancPages]))
+
             elif directive == "navigation":
                 gen.putString("<ul>\n")
                 openNodeStack = [x for x in walkAncestors(pageNode, DocPage)]
@@ -647,13 +657,10 @@ class DocHtmlText(DocBareNode):
                 siteNode.publishIndex(gen, pageNode, openNodeStack)
                 gen.putString("</ul>\n")
 
-            elif directive == "pagetitle":
-                gen.putString(pageNode.title)
-
             else:
                 print "warning: ignoring directive " + label            
-        if last < len(self.text):
-            gen.putXMLString(self.text[last:])
+        if next < len(self.text):
+            gen.putXMLString(self.text[next:])
 
     publish = makeBareGuard(publish)
 
